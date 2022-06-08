@@ -2,13 +2,15 @@ import numpy as np
 import scipy
 from matplotlib import pyplot as plt
 
-from scipy.special import roots_legendre
+from scipy.special import roots_legendre, legendre
 from numpy.linalg import eig
 
 import gl
 
-a = roots_legendre(gl.N+1)
-roots, weights = a[0], a[1] # shape (N+1, ), shape (N+1, )
+poly_Nplus1 = legendre(gl.N+1)
+poly_Nplus1_der = poly_Nplus1.deriv()
+a =  np.roots(poly_Nplus1_der)
+roots = a[0] # shape (N+1, )
 
 
 # Non-Linear Mapping 
