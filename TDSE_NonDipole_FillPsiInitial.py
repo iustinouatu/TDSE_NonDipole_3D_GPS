@@ -6,11 +6,11 @@ import gl
 
 from sympy.physics.hydrogen import Psi_nlm
 from sympy import *
-from sympy.abc import r, phi, theta, Z
+from sympy.abc import r, phi, theta, Z 
 
-rs = np.linspace(0.0, gl.r_max, num=400)
-thetas = np.linspace(0.0, np.pi, num=gl.N_thetas) # polar angle: 100
-phis = np.linspace(0.0, 2*np.pi, num=gl.N_phis) # azimuthal angle: 200
+rs = np.linspace(    0.0,    gl.r_max,   num = gl.N) # radial coordinate r
+thetas = np.linspace(0.0,    np.pi,      num = gl.N_thetas) # polar angle
+phis = np.linspace(  0.0,    2*np.pi,    num = gl.N_phis) # azimuthal angle
 
 rs, phis, thetas = np.meshgrid(rs, phis, thetas, indexing='ij')
 

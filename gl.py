@@ -12,3 +12,5 @@ L = alpha * r_max / 2
 
 # Partial waves maximum number
 L_max = 30
+
+exp_of_phis = 
