@@ -13,4 +13,5 @@ L = alpha * r_max / 2
 # Partial waves maximum number
 L_max = 30
 
-exp_of_phis = 
+phis = np.linspace(0.0, 2*np.pi, num=100)
+c_au = 137.036

@@ -1,5 +1,6 @@
+import time
 import numpy as np
-from matplotlib import pyplot as plt
+from matplotlib import container, pyplot as plt
 
 from scipy.special import roots_legendre, legendre, eval_legendre
 from astropy.coordinates import cartesian_to_spherical
@@ -16,7 +17,7 @@ Psi = np.zeros( (gl.N, gl.N_thetas, gl.N_phis, gl.N_timesteps) , dtype=np.comple
 Psi[:, :, :, 0] = np.load("Initial_PSI_n1_l0_m0_r_0to200.0_theta_0to3.141592653589793_phi_0to6.283185307179586_3Dgrid.npy")
 
 def main():
-    for t in range(gl.N_timesteps):
+    for timestep in range(gl.N_timesteps):
 
     # 1) Obtain the spectral coefficients C_{ilm} at the current timestep t
     # -------------------------------------------------------------------
@@ -29,7 +30,7 @@ def main():
         for i in range(gl.N):
             for l in range(gl.L_max):
                 for m in range(-l, l+1, 1):
-                    Cilmoft_times_Ril[i, l, :, m+l, 0] = TwoDim_quadrature(Psi[i, :, :, t], l, m)
+                    Cilmoft_times_Ril[i, l, :, m+l, 0] = TwoDim_quadrature(Psi[i, :, :, timestep], l, m)
 
     # 2) Propagate for half a timestep in the field-free Hamiltonian H_0^{l} for the partial wave numbered l: multiply C_{ilm} * R_{il}(r) by a phase
         for i in range(gl.N):
@@ -60,14 +61,15 @@ def main():
                     Psi[j, k, n, 0] = np.sum(  Psi_m[:, j, k] * np.exp(1j * np.arange(-gl.L_max, gl.L_max) * np.linspace(0.0, 2*np.pi, gl.N_phis)[n])  ) 
                     # np.exp(1j * np.arange(-gl.L_max, gl.L_max) * np.linspace(0.0, 2*np.pi, gl.N_phis)[n]) as a whole has shape (2*gl.L_max, )
 
-    # 4) Propagate for 1 timestep in the laser field
-        Psi[:, :, :, 1] = propagation_in_laser_field(Psi[:, :, :, 0], t)
+    # 4) Propagate for 1 timestep in the laser field (its operator being diagonal in the coordinate representation)
+        Psi[:, :, :, 1] = propagation_in_laser_field(Psi[:, :, :, 0], timestep)
 
 
 def propagation_in_laser_field(Psi_grid_repr, timestep):
-    E_field_cartesian = E_field(timestep + 0.5) # numpy array of shape (3, )
-    a, b, c = cartesian_to_spherical(E_field_cartesian[0], E_field_cartesian[1], E_field_cartesian[2])
-    E_field_spherical = np.array( [a, b, c] )
+    # timestep from arguments is current_timestep
+    Eprime_field_cartesian = Eprime_field(timestep + 0.5) # numpy array of shape (3, )
+    a, b, c = cartesian_to_spherical(Eprime_field_cartesian[0], Eprime_field_cartesian[1], Eprime_field_cartesian[2])
+    Eprime_field_spherical = np.array( [a, b, c] )
 
     for j in range(gl.N):
         for k in range(gl.N_thetas):
@@ -78,17 +80,30 @@ def propagation_in_laser_field(Psi_grid_repr, timestep):
                 phi = n * gl.delta_phi
                 vec_r = np.array( [r, theta, phi] )
 
-                V = (-vec_r * E_field_spherical)
+                V = (-vec_r * Eprime_field_spherical)
 
                 Psi_grid_repr[j, k, n]  =  Psi_grid_repr[j, k, n] * np.exp(-1j * V * gl.delta_t)
     return Psi_grid_repr
 
 
 
-def E_field(t):
-    # t from arguments is current_timestep + 0.5
-    
-    pass
+def Eprime_field(timestep_halfadded):
+    # timestep_halfadded from arguments is current_timestep + 0.5
+    container = A0oft(timestep_halfadded, gl.Temp_Env)
+    Aoft = container[0]
+    Aoft_der = container[1]
+    E_prime_x = Aoft**2 * np.sin(2 * gl.omega * timestep_halfadded*gl.delta_time ) * gl.omega / (2*gl.c_au)
+    E_prime_z = -gl.omega * Aoft*np.cos(gl.omega* timestep_halfadded*gl.delta_time) - Aoft_der * np.sin(gl.omega * timestep_halfadded*gl.delta_time)
+    return np.array([E_prime_x, 0.0, E_prime_z])
+
+def A0oft(timestep, Temporal_Envelope):
+    if Temporal_Envelope == "sin_squared":
+        T = gl.N * 2*np.pi / gl.omega
+        Actual_A = np.sin(np.pi * timestep*gl.delta_time / T) ** 2
+        Derivative_of_A = np.sin(2 * np.pi * timestep*gl.delta_time / T) * (np.pi/T)
+        return np.array([Actual_A, Derivative_of_A])
+    else:
+        pass
 
 def TwoDim_quadrature(Psi, l, m):
     # Psi is a numpy 2 dimensional array of size (gl.N_thetas, gl.N_phis)
@@ -112,6 +127,6 @@ def theta_Gauss_Quad(Psi, l):
     return containerr
 
 def phi_Trapez_Quad(bla, m):
-    # bla is 1 dimensional
+    # bla from arguments is a 1 dimensional array
     exp_of_phis = np.exp(-1j * m * gl.phis)
     return np.trapz(bla * exp_of_phis)
