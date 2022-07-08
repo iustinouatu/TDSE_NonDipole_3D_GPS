@@ -1,68 +1,133 @@
-import time
 import numpy as np
-from matplotlib import container, pyplot as plt
+from matplotlib import pyplot as plt
 
-from scipy.special import roots_legendre, legendre, eval_legendre
+from scipy.special import roots_legendre, legendre, eval_legendre, lpmv
 from astropy.coordinates import cartesian_to_spherical
-
-poly_Nplus1 = legendre(gl.N+1)
-poly_Nplus1_der = poly_Nplus1.deriv()
-a =  np.roots(poly_Nplus1_der)
-roots = a[0] # shape (N+1, )
 
 import gl
 
-eigenenergies = np.load(".npy") # shall be 2D array shape (, )
-Psi = np.zeros( (gl.N, gl.N_thetas, gl.N_phis, gl.N_timesteps) , dtype=np.complex128)
+eigenenergies_memory = np.load(".npy") # shall be 2D array shape (gl.N_rs - 1, gl.N_thetas)
+eigenvectors_memory = np.load(".npy") # shall be 3D array shape (gl.N_rs - 1, gl.N_rs - 1, gl.N_thetas)
+
+# Gauss - Lobatto
+# ----------------------
+poly_Nr = legendre(gl.N_rs)
+poly_Nr_der = poly_Nr.deriv()
+a =  np.roots(poly_Nr_der)
+roots = a[0] # shape (gl.N_rs - 1, )
+
+
+# Gauss - Legendre
+# ----------------------
+b =  roots_legendre(gl.N_thetas) # returned are the cosine-of-the-angle values, not the theta-angles themselves!
+roots_here, weights_here = b[0], b[1]
+
+
+
+def r_prime(x):
+    return gl.L * (2 + gl.alpha) / (1 - x + gl.alpha)**2
+
+
+# -------------------
+Psi = np.zeros( (gl.N_rs - 1, gl.N_thetas, gl.N_phis, gl.N_timesteps) , dtype=np.complex128)
 Psi[:, :, :, 0] = np.load("Initial_PSI_n1_l0_m0_r_0to200.0_theta_0to3.141592653589793_phi_0to6.283185307179586_3Dgrid.npy")
+
 
 def main():
     for timestep in range(gl.N_timesteps):
 
     # 1) Obtain the spectral coefficients C_{ilm} at the current timestep t
-    # -------------------------------------------------------------------
-    # Actually calculate the products C_{ilm} * R_{il}(r) [5D tensor (i, l, r, m, time)] 
-    # because this will be multiplied by a phase in the propagation: no need for the integral across r (only a 2D integral suffices)
+    # ---------------------------------------------------------------------
+        Cilmoft = np.zeros( (gl.N_rs - 1,  gl.N_thetas,  2*gl.N_thetas,  2), dtype=np.complex128) 
+        # first index: i,  second index: l,  third index: m,  fourth index: time dependence
 
-        Cilmoft_times_Ril = np.zeros( (gl.N, gl.L_max, gl.N, 2*gl.L_max, 2), dtype=np.complex128) 
-        # first index: i,  second index: l,  third index: the radial dependence (from R_{il}(r)),  fourth index: m,  fifth index: time dependence
-
-        for i in range(gl.N):
-            for l in range(gl.L_max):
+        for i in range(Cilmoft.shape[0]):
+            for l in range(Cilmoft.shape[1]):
                 for m in range(-l, l+1, 1):
-                    Cilmoft_times_Ril[i, l, :, m+l, 0] = TwoDim_quadrature(Psi[i, :, :, timestep], l, m)
+                    Cilmoft[i, l, m+l, 0] = ThreeDim_quadrature(Psi[:, :, :, timestep], i, l, m)
 
-    # 2) Propagate for half a timestep in the field-free Hamiltonian H_0^{l} for the partial wave numbered l: multiply C_{ilm} * R_{il}(r) by a phase
-        for i in range(gl.N):
-            for l in range(gl.L_max):
+    # 2) Propagate for half a timestep in the field-free Hamiltonian H_0^{l} for the partial wave numbered l: multiply C_{ilm}(t) by a phase
+        for i in range(gl.N_rs - 1):
+            for l in range(gl.N_thetas):
                 for m in range(-l, l+1, 1):
-                    Cilmoft_times_Ril[i, l, :, m+l, 1] = np.exp(-1j * eigenenergies[i, l] * gl.delta_t/2) * Cilmoft_times_Ril[i, l, :, m+l, 0]
+                    Cilmoft[i, l, m+l, 1] = np.exp(-1j * eigenenergies_memory[i, l] * gl.delta_t/2)  *   Cilmoft[i, l, m+l, 0]
 
     # 3) Start work for the transformation to obtain the grid representation of Psi
     # a) i -> r
-        Psi_lm = np.zeros( (gl.L_max, 2*gl.L_max, gl.N), dtype=np.complex128 )  # first index: l, second index: m, third index: the r-dependence Psi_{lm}(r), fourth index: time (WHY DO YOU NEED TIME DEPENDENCE IN THIS TENSOR?)
-        for l in range(gl.L_max):
+        Psi_lm = np.zeros( (gl.N_thetas,  2*gl.N_thetas+1,  gl.N_rs - 1), dtype=np.complex128 )  
+        # first index: l, second index: m, third index: the r-dependence Psi_{lm}(r)
+        for l in range(gl.N_thetas):
             for m in range(-l, l+1, 1):
-                for j in range(gl.N):
-                    Psi_lm[l, m, j] = np.sum(Cilmoft_times_Ril[:, l, j, m, 1])
+                for j in range(gl.N_rs - 1):
+                    Psi_lm[l, m, j] = np.sum(  Cilmoft[:, l, m, 1] * (eigenvectors_memory[j, :, l] * eval_legendre(gl.N_rs, roots[j]) / r_prime(roots[j]))   )
     
     # b) l -> theta
-        Psi_m = np.zeros( (2*gl.L_max, gl.N, gl.N_thetas) , dtype=np.complex128 )
-        for m in range(-gl.L_max, gl.L_max+1, 1):
-            for j in range(gl.N):
+        Psi_m = np.zeros( (2*gl.N_thetas+1,  gl.N_rs - 1,  gl.N_thetas) , dtype=np.complex128 )
+        for m in range(-gl.N_thetas,  gl.N_thetas + 1,  1):
+            for j in range(gl.N_rs - 1):
                 for k in range(gl.N_thetas):
-                    Psi_m[m+gl.L_max, j, k] = np.sum(Psi_lm[:, m+gl.L_max, j])
+                    norma = np.array( [ np.sqrt( (2*l+1) * np.math.factorial(l-m) / (4*np.pi * np.math.factorial(l+m)) ) for l in range(gl.N_thetas) ] ) # a 1D array shape (gl.N_thetas, )
+                    lpmvs = np.array( [ lpmv(m, l, roots_here[k]) for l in range(gl.N_thetas) ] ) # a 1D array shape (gl.N_thetas, )
+                    Psi_m[m + gl.N_thetas,  j,  k] = np.sum(Psi_lm[:,  m + gl.N_thetas,  j] * norma * lpmvs)
 
     # c) m -> phi
-        Psi = np.zeros( (gl.N, gl.N_thetas, gl.N_phis, 2), dtype=np.complex128)
-        for j in range(gl.N):
+        Psi = np.zeros( (gl.N_rs - 1,  gl.N_thetas,  gl.N_phis,  2), dtype=np.complex128)
+        for j in range(gl.N_rs -  1):
             for k in range(gl.N_thetas):
                 for n in range(gl.N_phis):
-                    Psi[j, k, n, 0] = np.sum(  Psi_m[:, j, k] * np.exp(1j * np.arange(-gl.L_max, gl.L_max) * np.linspace(0.0, 2*np.pi, gl.N_phis)[n])  ) 
+                    Psi[j, k, n, 0] = np.sum(  Psi_m[:, j, k] * np.exp(1j * np.arange(-gl.N_thetas, gl.N_thetas+1) * np.linspace(0.0, 2*np.pi, gl.N_phis)[n])  ) 
                     # np.exp(1j * np.arange(-gl.L_max, gl.L_max) * np.linspace(0.0, 2*np.pi, gl.N_phis)[n]) as a whole has shape (2*gl.L_max, )
 
     # 4) Propagate for 1 timestep in the laser field (its operator being diagonal in the coordinate representation)
         Psi[:, :, :, 1] = propagation_in_laser_field(Psi[:, :, :, 0], timestep)
+
+
+def ThreeDim_quadrature(Psi, i, l, m):
+    # Psi is a numpy 3 dimensional array of size (gl.N_rs - 1, gl.N_thetas + 1, gl.N_phis)
+    # 1) Integration wrt phi variable:
+    F1 = phi_Trapez_Quad(Psi, m) # F1 is 2 dimensional
+    
+    # 2) Integration wrt theta variable:
+    # {cos(theta_k)} are the L+1 zeros of P_{L+1}(cos(theta_k)) where L = gl.N_thetas (i.e. the maximum partial wave number)
+    F2 = theta_Gauss_Quad(F1, l, m) # F2 is 1 dimensional, F1 is 2 dimensional
+
+    # 3) Integration wrt r variable (actually x):
+    return  x_Lobatto_Quad(F2, i, l)
+
+
+def phi_Trapez_Quad(Psi, m):
+    # Psi from arguments is a 3 dimensional array
+    exp_of_phis = np.exp(-1j * m * gl.phis)
+
+    for contor in range(Psi.shape[2]):
+        Psi[:, :, contor] = Psi[:, :, contor] * exp_of_phis[contor]
+
+    return np.trapz(Psi, axis=-1)
+
+
+def theta_Gauss_Quad(F1, l, m):
+    # F1 from arguments is 2 dimensional
+
+    poly_results = eval_legendre(l, roots_here) # [P_l( cos(theta) ) for cos(theta) in roots_here]
+    containerr = np.zeros( (gl.N_rs - 1, ), dtype=np.complex128)
+
+    for idx in range(gl.N_rs - 1):
+        containerr[idx] = np.sum(weights_here * poly_results * F1[idx, :])
+    return containerr
+
+def x_Lobatto_Quad(F2, i, l):
+    # F2 from arguments is 1 dimensional
+
+    # lobatto quadrature preliminaries
+    poly_Nr = legendre(gl.N_rs)
+    poly_Nr_der = poly_Nr.deriv()
+    a =  np.roots(poly_Nr_der)
+    lobatto_nodes = a[0] # shape (gl.N_rs - 1, )
+
+    lobatto_weights = 2 / ( (gl.N_rs + 1) * (gl.N_rs + 2) * eval_legendre(gl.N_rs + 1, lobatto_nodes)**2 )
+    
+    # actual numerical integration
+    return np.sum(eigenvectors_memory[:, i, l] * F2 * lobatto_weights) # shall return a 0-dimensional complex128
 
 
 def propagation_in_laser_field(Psi_grid_repr, timestep):
@@ -105,29 +170,3 @@ def A0oft(timestep, Temporal_Envelope):
     else:
         pass
 
-def TwoDim_quadrature(Psi, l, m):
-    # Psi is a numpy 2 dimensional array of size (gl.N_thetas, gl.N_phis)
-
-    # 1) Integration wrt theta variable:
-    # {cos(theta_k)} are the L+1 zeros of P_{L+1}(cos(theta_k)) where L = gl.L_max (i.e. the maximum partial wave number)
-    intermediate_res = theta_Gauss_Quad(Psi, l) # intermediate_res is 1 dimensional
-    # 2) Integration wrt phi variable:
-    final_res = phi_Trapez_Quad(intermediate_res, m)
-    return final_res
-
-
-def theta_Gauss_Quad(Psi, l):
-    b =  roots_legendre(gl.L_max+1) 
-    roots_here, weights_here = b[0], b[1]
-    poly_results = eval_legendre(l, roots_here)
-
-    containerr = np.zeros( (gl.N_phis, ), dtype=np.complex128)
-
-    for idx in range(gl.N_phis):
-        containerr[idx] = np.sum(weights_here[1:] * poly_results[1:] * Psi[1:, idx])
-    return containerr
-
-def phi_Trapez_Quad(bla, m):
-    # bla from arguments is a 1 dimensional array
-    exp_of_phis = np.exp(-1j * m * gl.phis)
-    return np.trapz(bla * exp_of_phis)
