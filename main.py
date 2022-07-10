@@ -1,6 +1,9 @@
 import numpy as np
-from numba import jit, njit
+from numba import jit, njit, prange, objmode
 import math
+import time
+
+import cProfile
 
 from matplotlib import pyplot as plt
 
@@ -13,6 +16,26 @@ import gl
 eigenenergies_memory = np.load("eigenValues_N_rs100_alpha25.0_rmax200.0.npy") # shall be 2D array shape (gl.N_rs - 1,   gl.N_thetas)
 eigenvectors_memory = np.load("eigenVectors_N_rs100_alpha25.0_rmax200.0.npy") # shall be 3D array shape  (gl.N_rs - 1,   gl.N_rs - 1,   gl.N_thetas), first index is the r-dep, second index is the i-index, third index is the l-index
 # so eigenvectors_memory[:, K, L] is the eigenvector corresponding to the eigenvalue eigenenergies_memory[K, L], i.e. the K-th eigenvalue for the partial wave-number L
+
+results = {}
+def jit_timer(f):
+    jf = njit(f)
+    @njit(parallel=True, fastmath=True)
+    def wrapper(*args):
+        with objmode(start='float64'):
+            start = time.time()
+        g = jf(*args)
+        with objmode():
+            end = time.time()
+            run_time = end - start
+            if f.__name__ in results:
+                results[f.__name__] += [run_time]
+            else:
+                results[f.__name__] = [run_time]
+        return g
+    return wrapper
+
+
 
 # Gauss - Lobatto
 # ----------------------
@@ -129,21 +152,24 @@ def r_prime(x):
 
 # START
 # -------------------
-@njit
+# @jit_timer
+@njit(parallel=True, fastmath=True)
 def get_Cilmoft(Psi):
     Cilmoft = np.zeros( (gl.N_rs - 1,  gl.N_thetas,  2*gl.N_thetas-1,  2), dtype=np.complex128) 
-    for i in range(Cilmoft.shape[0]):
+    for i in prange(Cilmoft.shape[0]):
         for l in range(Cilmoft.shape[1]):
             for m in range(-l, l+1, 1):
+                if ( (i * Cilmoft.shape[0] + l * Cilmoft.shape[1]) % 100 == 0 ):
+                    print("bla")
                 Cilmoft[i, l, m+l, 0] = ThreeDim_quadrature(Psi, i, l, m)
                 
     return Cilmoft
 
-@njit
+@njit(parallel=False, fastmath=True)
 def propagate_in_fieldfree_H(Cilmoft):
-    for i in range(Cilmoft.shape[0]):
-        for l in range(Cilmoft.shape[1]):
-            for m in range(-l, l+1, 1):
+    for i in prange(Cilmoft.shape[0]):
+        for l in prange(Cilmoft.shape[1]):
+            for m in prange(-l, l+1, 1):
                 Cilmoft[i, l, m+l, 1] = np.exp(-1j * eigenenergies_memory[i, l] * gl.delta_t/2)  *   Cilmoft[i, l, m+l, 0]   
     return Cilmoft
 
@@ -164,70 +190,70 @@ for m in range(-gl.N_thetas+1,  gl.N_thetas,  1):
 def lpmv_withNJIT(m, k, l):
     return containeeeer[m, k, l]
 
-@njit
+@njit(parallel=False, fastmath=True )
 def get_PsiGrid_from_Cilmoft_part1(Cilmoft):
     # a) i -> r
     Psi_lm = np.zeros( (gl.N_thetas,   2*gl.N_thetas - 1,   gl.N_rs - 1), dtype=np.complex128 )  
     # first index: l, second index: m, third index: the r-dependence Psi_{lm}(r)
-    for l in range(Cilmoft.shape[1]):
-        for m in range(-l, l+1, 1):
-            for j in range(Cilmoft.shape[0]):
+    for l in prange(Cilmoft.shape[1]):
+        for m in prange(-l, l+1, 1):
+            for j in prange(Cilmoft.shape[0]):
                 Psi_lm[l, m+l, j] = np.sum(  Cilmoft[:, l, m+l, 1] * (eigenvectors_memory[j, :, l] * eval_legendre_for_Psi_lm(j) / r_prime(roots[j]))   )  
                 # multiplicative paranthesis comes from the conversion from A (in memory, obtained from C++, see Revisiting ... 2020) to the actual wavefunction value on grid     
     # b) l -> theta
     Psi_m = np.zeros( (2*gl.N_thetas - 1,    gl.N_rs - 1,    gl.N_thetas) , dtype=np.complex128 )
-    for m in range(-gl.N_thetas+1,  gl.N_thetas,  1):
-        for j in range(Cilmoft.shape[0]):
-            for k in range(Cilmoft.shape[1]):
+    for m in prange(-gl.N_thetas+1,  gl.N_thetas,  1):
+        for j in prange(Cilmoft.shape[0]):
+            for k in prange(Cilmoft.shape[1]):
                 normaliz = np.array(  [ np.sqrt( (2*l+1) * math.gamma(l-m) / (4*np.pi * math.gamma(l+m)) ) for l in range(np.abs(m), Cilmoft.shape[1]) ]  ) # a 1D array shape (Cilmoft.shape[1] - |m|,  ), i.e. shape (gl.N_thetas - |m|,  )
                 lpmvs = np.array(  [ lpmv_withNJIT(m, k, l) for l in range(np.abs(m), Cilmoft.shape[1]) ]  ) # a 1D array shape (Cilmoft.shape[1] - |m|,  ) i.e. of shape (gl.N_thetas - |m|,  )
                 Psi_m[m + (gl.N_thetas-1),  j,  k] = np.sum(Psi_lm[np.abs(m):,  m + (gl.N_thetas-1),  j] * normaliz * lpmvs)
     # c) m -> phi
     Psi_grid = np.zeros( (gl.N_rs - 1,  gl.N_thetas,  gl.N_phis,  2), dtype=np.complex128)  ###########################################################################################################################################################################
     phi = np.linspace(0.0, 2*np.pi, gl.N_phis)
-    for j in range(gl.N_rs -  1):
-        for k in range(gl.N_thetas):
-            for n in range(gl.N_phis):
+    for j in prange(gl.N_rs -  1):
+        for k in prange(gl.N_thetas):
+            for n in prange(gl.N_phis):
                 Psi_grid[j, k, n, 0] = np.sum(  Psi_m[:, j, k] * np.exp(1j * np.arange(-gl.N_thetas+1, gl.N_thetas) * phi[n])  ) 
                     # np.exp(1j * np.arange(-gl.L_max, gl.L_max) * np.linspace(0.0, 2*np.pi, gl.N_phis)[n]) as a whole has shape (2*gl.L_max, ) has shape ()
     return Psi_grid
 
-@njit
+@njit(parallel=False, fastmath=True )
 def get_PsiGrid_from_Cilmoft_part2(Cilmoft):
     # a) i -> r
     Psi_lm = np.zeros( (gl.N_thetas,   2*gl.N_thetas - 1,   gl.N_rs - 1), dtype=np.complex128 )  
     # first index: l, second index: m, third index: the r-dependence Psi_{lm}(r)
-    for l in range(Cilmoft.shape[1]):
-        for m in range(-l, l+1, 1):
-            for j in range(Cilmoft.shape[0]):
+    for l in prange(Cilmoft.shape[1]):
+        for m in prange(-l, l+1, 1):
+            for j in prange(Cilmoft.shape[0]):
                 Psi_lm[l, m+l, j] = np.sum(  Cilmoft[:, l, m+l, 1] * (eigenvectors_memory[j, :, l] * eval_legendre_for_Psi_lm(j) / r_prime(roots[j]))   )  
                     # multiplicative paranthesis comes from the conversion from A (in memory, obtained from C++, see Revisiting ... 2020) to the actual wavefunction value on grid     
     # b) l -> theta
     Psi_m = np.zeros( (2*gl.N_thetas - 1,    gl.N_rs - 1,    gl.N_thetas) , dtype=np.complex128 )
-    for m in range(-gl.N_thetas+1,  gl.N_thetas,  1):
-        for j in range(Cilmoft.shape[0]):
-            for k in range(Cilmoft.shape[1]):
+    for m in prange(-gl.N_thetas+1,  gl.N_thetas,  1):
+        for j in prange(Cilmoft.shape[0]):
+            for k in prange(Cilmoft.shape[1]):
                 normaliz = np.array(  [ np.sqrt( (2*l+1) * math.gamma(l-m) / (4*np.pi * math.gamma(l+m)) ) for l in range(np.abs(m), Cilmoft.shape[1]) ]  ) # a 1D array shape (Cilmoft.shape[1] - |m|,  ), i.e. shape (gl.N_thetas - |m|,  )
                 lpmvs = np.array(  [ lpmv_withNJIT(m, k, l) for l in range(np.abs(m), Cilmoft.shape[1]) ]  ) # a 1D array shape (Cilmoft.shape[1] - |m|,  ) i.e. of shape (gl.N_thetas - |m|,  )
                 Psi_m[m + (gl.N_thetas-1),  j,  k] = np.sum(Psi_lm[np.abs(m):,  m + (gl.N_thetas-1),  j] * normaliz * lpmvs)
     # c) m -> phi
     Psi_grid = np.zeros( (gl.N_rs - 1,  gl.N_thetas,  gl.N_phis), dtype=np.complex128)  ###########################################################################################################################################################################
     phi = np.linspace(0.0, 2*np.pi, gl.N_phis)
-    for j in range(gl.N_rs -  1):
-        for k in range(gl.N_thetas):
-            for n in range(gl.N_phis):
+    for j in prange(gl.N_rs -  1):
+        for k in prange(gl.N_thetas):
+            for n in prange(gl.N_phis):
                 Psi_grid[j, k, n] = np.sum(  Psi_m[:, j, k] * np.exp(1j * np.arange(-gl.N_thetas+1, gl.N_thetas) * phi[n])  ) 
                     # np.exp(1j * np.arange(-gl.L_max, gl.L_max) * np.linspace(0.0, 2*np.pi, gl.N_phis)[n]) as a whole has shape (2*gl.L_max, ) has shape ()
     return Psi_grid
 
-@njit
+@njit(parallel=False, fastmath=True )
 def cartesian_to_spherical_withNJIT(Ex, Ey, Ez):
     r = np.sqrt(Ex**2 + Ey**2 + Ez**2)
     theta = np.arccos(Ez / r)
     phi = np.arctan2(Ey, Ex)
     return r, theta, phi
 
-@njit
+@njit(parallel=False, fastmath=True )
 def propagation_in_laser_field(Psi_grid_repr, timestep):
     # timestep from arguments is current_timestep
     # Psi_grid_repr from arguments is shape (gl.N_rs - 1,  gl.N_thetas,  gl.N_phis)
@@ -238,9 +264,9 @@ def propagation_in_laser_field(Psi_grid_repr, timestep):
     a, b, c = cartesian_to_spherical_withNJIT(Eprime_field_cartesian[0], Eprime_field_cartesian[1], Eprime_field_cartesian[2])
     Eprime_field_spherical = np.array( [a, b, c], dtype=np.complex128 )
 
-    for j in range(gl.N_rs - 1):
-        for k in range(gl.N_thetas):
-            for n in range(gl.N_phis):
+    for j in prange(gl.N_rs - 1):
+        for k in prange(gl.N_thetas):
+            for n in prange(gl.N_phis):
 
                 x = roots[j]  # roots is an array shape (gl.N_rs - 1, ) containing the gl.N_rs - 1 roots of the derivative of the Legendre poly of order gl.N_rs of x (poly which after derivative becomes of order gl.N_rs - 1) 
                 r_coord = r(x)
@@ -253,7 +279,6 @@ def propagation_in_laser_field(Psi_grid_repr, timestep):
                 Psi_grid_repr[j, k, n]  =  Psi_grid_repr[j, k, n] * np.exp(-1j * V * gl.delta_t)
     return Psi_grid_repr   
 
-
 def main():
     Psi = np.zeros( (gl.N_rs - 1,  gl.N_thetas,  gl.N_phis,  gl.N_timesteps) , dtype=np.complex128)
     Psi[:, :, :, 0] = np.load("Initial_PSI_n1_l0_m0_r_0to200.0_theta_0to3.141592653589793_phi_0to6.283185307179586_3Dgrid.npy")
@@ -261,13 +286,143 @@ def main():
     for timestep in range(gl.N_timesteps):
         print("We are at timestep number {} out of a total of {} timesteps.".format(timestep+1, gl.N_timesteps))
         Cilmoft = get_Cilmoft(Psi[:, :, :, timestep])
+        # get_Cilmoft.parallel_diagnostics(level=4)
+        print("We got Cilmoft")
         Cilmoft = propagate_in_fieldfree_H(Cilmoft)
+        print("We propagated in the field free H")
         Psi_grid = get_PsiGrid_from_Cilmoft_part1(Cilmoft)
+        print("We converted to the grid repr of the wavefunction")
         Psi_grid[:, :, :, 1] = propagation_in_laser_field(Psi_grid[:, :, :, 0], timestep)
+        print("We propagated in the laser field by a multiplication of the space grids")
         Cilmoft = get_Cilmoft(Psi_grid[:, :, :, 1])
+        print("We got Cilmoft again")
         Cilmoft = propagate_in_fieldfree_H(Cilmoft)
+        print("We propagated in the field free H for the remaining half a timestep")
         Psi_grid = get_PsiGrid_from_Cilmoft_part2(Cilmoft)
+        print("We converted to the grid repr of the wavefunction")
         Psi[:, :, :, timestep+1] = Psi_grid
+        print("This is the end of the timestep number {} out of a total of {} timesteps".format(timestep+1, gl.N_timesteps))
+
+
+
+legendre_results = np.zeros( (gl.N_thetas, roots_here.shape[0]) , dtype=np.complex128)
+for l in range(gl.N_thetas):
+    legendre_results[l, :] = eval_legendre(l, roots_here)
+@njit
+def eval_legendre_withNJIT(l):
+    return legendre_results[l, :]
+
+
+@njit(fastmath=True)
+def ThreeDim_quadrature(Psi, i, l, m):
+    # Psi is a numpy 3 dimensional array of size (gl.N_rs - 1, gl.N_thetas + 1, gl.N_phis)
+    # 1) Integration wrt phi variable:
+    F1 = phi_Trapez_Quad(Psi, m) # F1 is 2 dimensional
+    print("We did tge phi integral")
+    # 2) Integration wrt theta variable:
+    # {cos(theta_k)} are the L+1 zeros of P_{L+1}(cos(theta_k)) where L = gl.N_thetas (i.e. the maximum partial wave number)
+    F2 = theta_Gauss_Quad(F1, l, m) # F2 is 1 dimensional, F1 is 2 dimensional
+    print("We did the theta integral")
+    # 3) Integration wrt r variable (actually x):
+    to_ret =  x_Lobatto_Quad(F2, i, l)
+    # x_Lobatto_Quad.parallel_diagnostics(level=4)
+    print("We did the x (r) integral")
+    return to_ret
+
+@njit(parallel=True, fastmath=True)
+def phi_Trapez_Quad(Psi, m):
+    # Psi from arguments is a 3 dimensional array
+    exp_of_phis = np.exp(-1j * m * gl.phis)
+
+    for contor in prange(Psi.shape[2]):
+        Psi[:, :, contor] = Psi[:, :, contor] * exp_of_phis[contor]
+
+    # return np.trapz(Psi, axis=-1)
+    res = np.zeros( (Psi.shape[0], Psi.shape[1]), dtype=np.complex128)
+    for i in prange(Psi.shape[0]):
+        for j in prange(Psi.shape[1]):
+            res[i, j] = np.trapz(Psi[i, j, :])
+    return res
+
+@njit(parallel=True, fastmath=True)
+def theta_Gauss_Quad(F1, l, m):
+    # F1 from arguments is 2 dimensional
+    poly_results = eval_legendre_withNJIT(l) # [P_l( cos(theta) ) for cos(theta) in roots_here]
+    containerr = np.zeros( (gl.N_rs - 1, ), dtype=np.complex128)
+
+    for idx in prange(gl.N_rs - 1):
+        containerr[idx] = np.sum(weights_here * poly_results * F1[idx, :])
+    return containerr
+
+
+lobatto_weights = 2 / ( (gl.N_rs) * (gl.N_rs+1) * eval_legendre(gl.N_rs, lobatto_nodes)**2 )
+
+@njit(fastmath=True)
+def x_Lobatto_Quad(F2, i, l):
+    # F2 from arguments is 1 dimensional
+    a = eigenvectors_memory[:, i, l] * F2 * lobatto_weights
+    # actual numerical integration
+    to_ret = np.sum(a)
+    return np.complex128(to_ret) # shall return a 0-dimensional complex128
+
+@njit
+def Eprime_field(timestep_halfadded):
+    # timestep_halfadded from arguments is current_timestep + 0.5
+    container = A0oft(timestep_halfadded, gl.Temp_Env)
+    Aoft = container[0]
+    Aoft_der = container[1]
+    E_prime_x = Aoft**2 * np.sin(2 * gl.omega * timestep_halfadded*gl.delta_t ) * gl.omega / (2*gl.c_au)
+    E_prime_z = -gl.omega * Aoft*np.cos(gl.omega* timestep_halfadded*gl.delta_t) - Aoft_der * np.sin(gl.omega * timestep_halfadded*gl.delta_t)
+    return np.array([E_prime_x, 0.0, E_prime_z])
+
+@njit
+def A0oft(timestep, Temporal_Envelope):
+    if Temporal_Envelope == "sin_squared":
+        T = gl.N * 2*np.pi / gl.omega
+        Actual_A = np.sin(np.pi * timestep*gl.delta_t / T) ** 2
+        Derivative_of_A = np.sin(2 * np.pi * timestep*gl.delta_t / T) * (np.pi/T)
+        return np.array([Actual_A, Derivative_of_A])
+    else:
+        pass
+
+
+def profile_results():
+    l = []
+    for k in results:
+        a = np.asarray(results[k])
+        l += [[k+' '*(13-len(k)), np.sum(a[1:])]]
+    l = sorted(l, key=lambda x: x[1])
+    for i in range(len(l)):
+        print( l[i][0], "{:.6f}".format( l[i][1] ) )
+
+
+if __name__ == "__main__":
+    cProfile.run('main()')
+
+
+##################################################################################################################################################################################################################
+# def propagation_in_laser_field(Psi_grid_repr, timestep):
+#     # timestep from arguments is current_timestep
+#     # Psi_grid_repr from arguments is shape (gl.N_rs - 1,  gl.N_thetas,  gl.N_phis)
+
+#     Eprime_field_cartesian = Eprime_field(timestep + 0.5) # numpy array of shape (3, )
+#     a, b, c = cartesian_to_spherical(Eprime_field_cartesian[0], Eprime_field_cartesian[1], Eprime_field_cartesian[2])
+#     Eprime_field_spherical = np.array( [a, b.value, c.value] )
+
+#     for j in range(gl.N_rs - 1):
+#         for k in range(gl.N_thetas):
+#             for n in range(gl.N_phis):
+
+#                 x = roots[j]  # roots is an array shape (gl.N_rs - 1, ) containing the gl.N_rs - 1 roots of the derivative of the Legendre poly of order gl.N_rs of x (poly which after derivative becomes of order gl.N_rs - 1) 
+#                 r_coord = r(x)
+#                 theta = k * gl.delta_theta
+#                 phi = n * gl.delta_phi
+#                 vec_r = np.array( [r_coord, theta, phi] )
+
+#                 V = np.dot(-vec_r, Eprime_field_spherical)
+
+#                 Psi_grid_repr[j, k, n]  =  Psi_grid_repr[j, k, n] * np.exp(-1j * V * gl.delta_t)
+#     return Psi_grid_repr
 
         # Cilmoft = np.zeros( (gl.N_rs - 1,  gl.N_thetas,  2*gl.N_thetas-1,  2), dtype=np.complex128) 
         # # first index: i,  second index: l,  third index: m,  fourth index: time dependence
@@ -417,107 +572,3 @@ def main():
 #             for l in range(Cilmoft.shape[1]):
 #                 for m in range(-l, l+1, 1):
 #                     Cilmoft[i, l, m+l, 1] = np.exp(-1j * eigenenergies_memory[i, l] * gl.delta_t/2)  *   Cilmoft[i, l, m+l, 0] 
-
-legendre_results = np.zeros( (gl.N_thetas, roots_here.shape[0]) , dtype=np.complex128)
-for l in range(gl.N_thetas):
-    legendre_results[l, :] = eval_legendre(l, roots_here)
-@njit
-def eval_legendre_withNJIT(l):
-    return legendre_results[l, :]
-
-
-@njit
-def ThreeDim_quadrature(Psi, i, l, m):
-    # Psi is a numpy 3 dimensional array of size (gl.N_rs - 1, gl.N_thetas + 1, gl.N_phis)
-    # 1) Integration wrt phi variable:
-    F1 = phi_Trapez_Quad(Psi, m) # F1 is 2 dimensional
-    
-    # 2) Integration wrt theta variable:
-    # {cos(theta_k)} are the L+1 zeros of P_{L+1}(cos(theta_k)) where L = gl.N_thetas (i.e. the maximum partial wave number)
-    F2 = theta_Gauss_Quad(F1, l, m) # F2 is 1 dimensional, F1 is 2 dimensional
-
-    # 3) Integration wrt r variable (actually x):
-    return  np.complex128(x_Lobatto_Quad(F2, i, l))
-
-@njit
-def phi_Trapez_Quad(Psi, m):
-    # Psi from arguments is a 3 dimensional array
-    exp_of_phis = np.exp(-1j * m * gl.phis)
-
-    for contor in range(Psi.shape[2]):
-        Psi[:, :, contor] = Psi[:, :, contor] * exp_of_phis[contor]
-
-    # return np.trapz(Psi, axis=-1)
-    res = np.zeros( (Psi.shape[0], Psi.shape[1]), dtype=np.complex128)
-    for i in range(Psi.shape[0]):
-        for j in range(Psi.shape[1]):
-            res[i, j] = np.trapz(Psi[i, j, :])
-    return res
-
-@njit
-def theta_Gauss_Quad(F1, l, m):
-    # F1 from arguments is 2 dimensional
-    poly_results = eval_legendre_withNJIT(l) # [P_l( cos(theta) ) for cos(theta) in roots_here]
-    containerr = np.zeros( (gl.N_rs - 1, ), dtype=np.complex128)
-
-    for idx in range(gl.N_rs - 1):
-        containerr[idx] = np.sum(weights_here * poly_results * F1[idx, :])
-    return containerr
-
-
-lobatto_weights = 2 / ( (gl.N_rs) * (gl.N_rs+1) * eval_legendre(gl.N_rs, lobatto_nodes)**2 )
-
-@njit
-def x_Lobatto_Quad(F2, i, l):
-    # F2 from arguments is 1 dimensional
-
-    # actual numerical integration
-    return np.sum(eigenvectors_memory[:, i, l] * F2 * lobatto_weights) # shall return a 0-dimensional complex128
-
-
-# def propagation_in_laser_field(Psi_grid_repr, timestep):
-#     # timestep from arguments is current_timestep
-#     # Psi_grid_repr from arguments is shape (gl.N_rs - 1,  gl.N_thetas,  gl.N_phis)
-
-#     Eprime_field_cartesian = Eprime_field(timestep + 0.5) # numpy array of shape (3, )
-#     a, b, c = cartesian_to_spherical(Eprime_field_cartesian[0], Eprime_field_cartesian[1], Eprime_field_cartesian[2])
-#     Eprime_field_spherical = np.array( [a, b.value, c.value] )
-
-#     for j in range(gl.N_rs - 1):
-#         for k in range(gl.N_thetas):
-#             for n in range(gl.N_phis):
-
-#                 x = roots[j]  # roots is an array shape (gl.N_rs - 1, ) containing the gl.N_rs - 1 roots of the derivative of the Legendre poly of order gl.N_rs of x (poly which after derivative becomes of order gl.N_rs - 1) 
-#                 r_coord = r(x)
-#                 theta = k * gl.delta_theta
-#                 phi = n * gl.delta_phi
-#                 vec_r = np.array( [r_coord, theta, phi] )
-
-#                 V = np.dot(-vec_r, Eprime_field_spherical)
-
-#                 Psi_grid_repr[j, k, n]  =  Psi_grid_repr[j, k, n] * np.exp(-1j * V * gl.delta_t)
-#     return Psi_grid_repr
-
-
-@njit
-def Eprime_field(timestep_halfadded):
-    # timestep_halfadded from arguments is current_timestep + 0.5
-    container = A0oft(timestep_halfadded, gl.Temp_Env)
-    Aoft = container[0]
-    Aoft_der = container[1]
-    E_prime_x = Aoft**2 * np.sin(2 * gl.omega * timestep_halfadded*gl.delta_t ) * gl.omega / (2*gl.c_au)
-    E_prime_z = -gl.omega * Aoft*np.cos(gl.omega* timestep_halfadded*gl.delta_t) - Aoft_der * np.sin(gl.omega * timestep_halfadded*gl.delta_t)
-    return np.array([E_prime_x, 0.0, E_prime_z])
-
-@njit
-def A0oft(timestep, Temporal_Envelope):
-    if Temporal_Envelope == "sin_squared":
-        T = gl.N * 2*np.pi / gl.omega
-        Actual_A = np.sin(np.pi * timestep*gl.delta_t / T) ** 2
-        Derivative_of_A = np.sin(2 * np.pi * timestep*gl.delta_t / T) * (np.pi/T)
-        return np.array([Actual_A, Derivative_of_A])
-    else:
-        pass
-
-if __name__ == "__main__":
-    main()

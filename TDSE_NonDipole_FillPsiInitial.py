@@ -14,8 +14,7 @@ phis = np.linspace(  0.0,    2*np.pi,    num = gl.N_phis) # azimuthal angle
 rs, phis, thetas = np.meshgrid(rs, phis, thetas, indexing='ij')
 
 f = lambdify( [r, phi, theta], Psi_nlm(1, 0, 0, r, phi, theta, Z=1), "numpy")
-print(f(rs, phis, thetas).shape)
-# print(np.unique(f(rs, phis, thetas)).shape)
+
 
 wavef_grid_values = f(rs, phis, thetas) # shape (gl.N_rs - 1, gl.N_phis, gl.N_thetas)
 wavef_grid_values_new = np.zeros( (wavef_grid_values.shape[0], wavef_grid_values.shape[2], wavef_grid_values.shape[1]) , dtype=np.complex128)

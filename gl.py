@@ -8,7 +8,7 @@ phis = np.linspace(0.0, 2*np.pi, num = N_phis)
 delta_theta = np.float64(np.pi / N_thetas)
 delta_phi = np.float64(2*np.pi / N_phis)
 
-N_timesteps = np.int(500)
+N_timesteps = np.int(1)
 
 r_max = np.float64(200.0)
 alpha = np.float64(25)
